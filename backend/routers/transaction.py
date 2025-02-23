@@ -90,6 +90,15 @@ def update_transaction(transaction_id: int, tx: TransactionUpdate, db: Session =
         raise HTTPException(status_code=404, detail="Transaction not found or is locked.")
     return updated_tx
 
+@router.delete("/delete_all", status_code=204)
+def delete_all_transactions_endpoint(db: Session = Depends(get_db)):
+    """
+    Delete all transactions from the database. This will remove all Transaction records,
+    and cascade delete associated LedgerEntries, BitcoinLots, and LotDisposals.
+    """
+    deleted_count = tx_service.delete_all_transactions(db)
+    return {"deleted_count": deleted_count}
+
 
 @router.delete("/{transaction_id}", status_code=204)
 def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
@@ -102,3 +111,4 @@ def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
     if not success:
         raise HTTPException(status_code=404, detail="Transaction not found or cannot be deleted.")
     return
+
