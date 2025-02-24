@@ -32,7 +32,7 @@ interface TransactionFormData {
   account?: AccountType;
   currency?: Currency;
   amount?: number;
-  source?: DepositSource;     // For BTC deposit
+  source?: DepositSource;      // For BTC deposit
   purpose?: WithdrawalPurpose; // For BTC withdrawal
   fee?: number;               // We unify the numeric fee (BTC or USD)
   costBasisUSD?: number;      // For external BTC deposit or "Buy"
@@ -44,6 +44,9 @@ interface TransactionFormData {
   toCurrency?: Currency;
   amountFrom?: number;  // from side (BTC or USD)
   amountTo?: number;    // to side (BTC or USD)
+
+  // Added: proceeds_usd for BTC withdrawals or sells
+  proceeds_usd?: number;
 
   // Buy/Sell
   amountUSD?: number;
@@ -163,6 +166,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
       timestamp: new Date().toISOString().slice(0, 16),
       fee: 0,
       costBasisUSD: 0,
+      // Added: Guarantee proceeds_usd starts at 0
+      proceeds_usd: 0,
     },
   });
 
@@ -188,7 +193,6 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
   const amountBtcVal = watch("amountBTC") || 0;
 
   /**
-   * NEW SNIPPETS:
    * These useEffects log user inputs for debugging. 
    * They do not affect the double-entry logic; they are
    * simply ensuring TypeScript handles the watch variables.
@@ -259,6 +263,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
       timestamp: new Date().toISOString().slice(0, 16),
       fee: 0,
       costBasisUSD: 0,
+      // Added: Keep proceeds_usd at 0 on reset
+      proceeds_usd: 0,
     });
   };
 
@@ -302,6 +308,11 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
    * where it becomes multiple ledger entries, plus optional BTC lot usage.
    */
   const onSubmit: SubmitHandler<TransactionFormData> = async (data) => {
+    // Added: if BTC Withdrawal => ensure proceeds_usd is a real number (default 0)
+    if (data.type === "Withdrawal" && data.currency === "BTC" && !data.proceeds_usd) {
+      data.proceeds_usd = 0;
+    }
+
     // 1) from/to IDs
     const { from_account_id, to_account_id } = mapDoubleEntryAccounts(data);
     const isoTimestamp = new Date(data.timestamp).toISOString();
@@ -317,7 +328,6 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
     switch (data.type) {
       case "Deposit": {
         amount = data.amount || 0;
-        // If deposit is BTC => feeCurrency = "BTC"; otherwise "USD"
         feeCurrency = data.currency === "BTC" ? "BTC" : "USD";
         source = data.source && data.source !== "N/A" ? data.source : "N/A";
         if (showCostBasisField) {
@@ -329,6 +339,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
         amount = data.amount || 0;
         feeCurrency = data.currency === "BTC" ? "BTC" : "USD";
         purpose = data.purpose && data.purpose !== "N/A" ? data.purpose : "N/A";
+        // Added: now we actually set proceeds_usd from data
+        proceeds_usd = data.proceeds_usd;
         break;
       }
       case "Transfer": {
@@ -338,16 +350,15 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
         break;
       }
       case "Buy": {
-        // from= ExchangeUSD => to= ExchangeBTC
         amount = data.amountUSD || 0;
         feeCurrency = "USD";
         cost_basis_usd = amount; // how much USD you spent
         break;
       }
       case "Sell": {
-        // from= ExchangeBTC => to= ExchangeUSD
         amount = data.amountBTC || 0;
         feeCurrency = "USD";
+        // We were already setting proceeds_usd for Sell
         proceeds_usd = data.amountUSD || 0;
         break;
       }
@@ -363,7 +374,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
       fee_amount: data.fee || 0,
       fee_currency: feeCurrency,
       cost_basis_usd,
-      proceeds_usd,
+      proceeds_usd, // includes your new "Withdrawal" assignment
       source,
       purpose,
       is_locked: false,
@@ -498,7 +509,10 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
           </>
         );
 
-      case "Withdrawal":
+      case "Withdrawal": {
+        const purposeVal = watch("purpose");
+        const proceedsUsdVal = watch("proceeds_usd") ?? 0;
+
         return (
           <>
             <div className="form-group">
@@ -547,7 +561,10 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
                 type="number"
                 step="0.00000001"
                 className="form-control"
-                {...register("amount", { required: true, valueAsNumber: true })}
+                {...register("amount", {
+                  required: true,
+                  valueAsNumber: true,
+                })}
               />
               {errors.amount && (
                 <span className="error-text">Amount is required</span>
@@ -560,7 +577,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
                 className="form-control"
                 {...register("purpose", { required: true })}
               >
-                <option value="N/A">N/A</option>
+                <option value="">Select Purpose</option>
                 <option value="Spent">Spent</option>
                 <option value="Gift">Gift</option>
                 <option value="Donation">Donation</option>
@@ -577,171 +594,143 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
                 {...register("fee", { valueAsNumber: true })}
               />
             </div>
+
+            {currency === "BTC" && (
+              <div className="form-group">
+                <label>Proceeds (USD):</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-control"
+                  defaultValue={0}
+                  {...register("proceeds_usd", { valueAsNumber: true })}
+                />
+              </div>
+            )}
+
+            {currency === "BTC" &&
+              purposeVal === "Spent" &&
+              proceedsUsdVal === 0 && (
+                <div style={{ color: "red", marginTop: "5px" }}>
+                  <strong>Warning:</strong> You selected “Spent” but “Proceeds (USD)” is 0.
+                </div>
+            )}
           </>
         );
+      }
 
-        case "Transfer":
-          /**
-           * Main scenario:
-           * - The user is transferring funds between accounts.
-           * - We automatically calculate a BTC transfer fee as (amountFrom - amountTo).
-           * - The fee is shown in BTC with an approximate USD label, using `feeInUsdDisplay`.
-           * - For "Bank" or "Wallet", the `fromCurrency` is read-only and auto-set via useEffect (Bank -> USD, Wallet -> BTC).
-           * - For "Exchange", we let the user choose between "USD" or "BTC" with a <select>.
-           */
-          return (
-            <>
-              {/* 
-                1) FROM ACCOUNT
-                This <select> lets the user choose the account they're transferring from.
-                "Bank", "Wallet", and "Exchange" map to different internal IDs in the backend.
-              */}
-              <div className="form-group">
-                <label>From Account:</label>
+      case "Transfer":
+        return (
+          <>
+            <div className="form-group">
+              <label>From Account:</label>
+              <select
+                className="form-control"
+                {...register("fromAccount", { required: true })}
+              >
+                <option value="">Select From Account</option>
+                <option value="Bank">Bank Account</option>
+                <option value="Wallet">Bitcoin Wallet</option>
+                <option value="Exchange">Exchange</option>
+              </select>
+              {errors.fromAccount && (
+                <span className="error-text">From Account is required</span>
+              )}
+            </div>
+
+            <div className="form-group">
+              <label>From Currency:</label>
+              {fromAccount === "Exchange" ? (
                 <select
                   className="form-control"
-                  {...register("fromAccount", { required: true })}
+                  {...register("fromCurrency", { required: true })}
                 >
-                  <option value="">Select From Account</option>
-                  <option value="Bank">Bank Account</option>
-                  <option value="Wallet">Bitcoin Wallet</option>
-                  <option value="Exchange">Exchange</option>
+                  <option value="">Select Currency</option>
+                  <option value="USD">USD</option>
+                  <option value="BTC">BTC</option>
                 </select>
-                {errors.fromAccount && (
-                  <span className="error-text">From Account is required</span>
-                )}
-              </div>
-        
-              {/*
-                2) FROM CURRENCY
-                - If "fromAccount" is "Exchange", show a dropdown for user to pick either USD or BTC.
-                - Otherwise, we show a read-only input. (Your useEffect auto-sets it to "USD" for Bank,
-                  or "BTC" for Wallet.)
-              */}
-              <div className="form-group">
-                <label>From Currency:</label>
-                {fromAccount === "Exchange" ? (
-                  // When user chooses Exchange, let them select USD or BTC
-                  <select
-                    className="form-control"
-                    {...register("fromCurrency", { required: true })}
-                  >
-                    <option value="">Select Currency</option>
-                    <option value="USD">USD</option>
-                    <option value="BTC">BTC</option>
-                  </select>
-                ) : (
-                  // Otherwise, it's just a read-only text field
-                  <input
-                    type="text"
-                    className="form-control"
-                    {...register("fromCurrency")}
-                    readOnly
-                  />
-                )}
-                {errors.fromCurrency && (
-                  <span className="error-text">From Currency is required</span>
-                )}
-              </div>
-        
-              {/*
-                3) AMOUNT (FROM)
-                - The numeric input representing how much currency is leaving the "fromAccount."
-                - The step is set to 8 decimal places (suitable for BTC but also fine for USD).
-                - We require a value here and parse it as a number.
-              */}
-              <div className="form-group">
-                <label>Amount (From):</label>
-                <input
-                  type="number"
-                  step="0.00000001"
-                  className="form-control"
-                  {...register("amountFrom", {
-                    required: true,
-                    valueAsNumber: true,
-                  })}
-                />
-                {errors.amountFrom && (
-                  <span className="error-text">Amount (From) is required</span>
-                )}
-              </div>
-        
-              {/*
-                4) TO ACCOUNT
-                - This is read-only because your `useEffect` logic automatically chooses
-                  the appropriate "toAccount" based on "fromAccount" and "fromCurrency".
-              */}
-              <div className="form-group">
-                <label>To Account:</label>
+              ) : (
                 <input
                   type="text"
                   className="form-control"
-                  {...register("toAccount")}
+                  {...register("fromCurrency")}
                   readOnly
                 />
-              </div>
-        
-              {/*
-                5) TO CURRENCY
-                - Also read-only, auto-set based on the "fromAccount"/"fromCurrency"
-                  combination. E.g., if you're transferring from Bank (USD) to Exchange, 
-                  "toCurrency" might also be USD, etc.
-              */}
-              <div className="form-group">
-                <label>To Currency:</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  {...register("toCurrency")}
-                  readOnly
-                />
-              </div>
-        
-              {/*
-                6) AMOUNT (TO)
-                - The user types how much ends up in the "toAccount."
-                - The difference between "amountFrom" and "amountTo" is treated as the BTC fee
-                  if the fromCurrency is BTC (see your auto-fee effect).
-              */}
-              <div className="form-group">
-                <label>Amount (To):</label>
-                <input
-                  type="number"
-                  step="0.00000001"
-                  className="form-control"
-                  {...register("amountTo", {
-                    required: true,
-                    valueAsNumber: true,
-                  })}
-                />
-                {errors.amountTo && (
-                  <span className="error-text">Amount (To) is required</span>
-                )}
-              </div>
-        
-              {/*
-                7) FEE (BTC)
-                - This is a read-only field because your code calculates it automatically.
-                - If fromCurrency is BTC, fee = (amountFrom - amountTo). 
-                - feeInUsdDisplay shows an approximate cost in USD using a mock price.
-              */}
-              <div className="form-group">
-                <label>Fee (BTC):</label>
-                <input
-                  type="number"
-                  step="0.00000001"
-                  className="form-control"
-                  {...register("fee", { valueAsNumber: true })}
-                  readOnly
-                />
-                {feeInUsdDisplay > 0 && (
-                  <small style={{ color: "#bbb" }}>
-                    (~ ${feeInUsdDisplay} USD)
-                  </small>
-                )}
-              </div>
-            </>
-          );        
+              )}
+              {errors.fromCurrency && (
+                <span className="error-text">From Currency is required</span>
+              )}
+            </div>
+
+            <div className="form-group">
+              <label>Amount (From):</label>
+              <input
+                type="number"
+                step="0.00000001"
+                className="form-control"
+                {...register("amountFrom", {
+                  required: true,
+                  valueAsNumber: true,
+                })}
+              />
+              {errors.amountFrom && (
+                <span className="error-text">Amount (From) is required</span>
+              )}
+            </div>
+
+            <div className="form-group">
+              <label>To Account:</label>
+              <input
+                type="text"
+                className="form-control"
+                {...register("toAccount")}
+                readOnly
+              />
+            </div>
+
+            <div className="form-group">
+              <label>To Currency:</label>
+              <input
+                type="text"
+                className="form-control"
+                {...register("toCurrency")}
+                readOnly
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Amount (To):</label>
+              <input
+                type="number"
+                step="0.00000001"
+                className="form-control"
+                {...register("amountTo", {
+                  required: true,
+                  valueAsNumber: true,
+                })}
+              />
+              {errors.amountTo && (
+                <span className="error-text">Amount (To) is required</span>
+              )}
+            </div>
+
+            <div className="form-group">
+              <label>Fee (BTC):</label>
+              <input
+                type="number"
+                step="0.00000001"
+                className="form-control"
+                {...register("fee", { valueAsNumber: true })}
+                readOnly
+              />
+              {feeInUsdDisplay > 0 && (
+                <small style={{ color: "#bbb" }}>
+                  (~ ${feeInUsdDisplay} USD)
+                </small>
+              )}
+            </div>
+          </>
+        );
 
       case "Buy":
         return (
